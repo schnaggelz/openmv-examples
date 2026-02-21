@@ -1,32 +1,32 @@
 import sensor
 import pyb
 import time
-import math
-import image
 
 uart = pyb.UART(1, 57600, timeout_char=50)
 
 class PidControl:
     KP = 2.0
-    KI = 0.0
+    KI = 0.1
     KD = 1.0
+    MAX_CORR = 60
 
-    def __init__(self, setpoint, dt):
-        self._setpoint = setpoint
-        self._dt = dt
-        self._pv = 0
-        self._error = 0
+    def __init__(self):
         self._previous_error = 0
         self._integral = 0
-        self._derivative = 0
 
-    def update(self, pv):
-        self._error = self._setpoint - pv
-        self._integral += self._error * self._dt
-        self._derivative = (self._error - self._previous_error) / self._dt
-        cv = PidControl.KP * self._error + \
-            PidControl.KI * self._integral + \
-            PidControl.KD * self._derivative
+    def update(self, error):
+        p = error * self.KP
+
+        self._integral += error
+        self._integral = max(-100, min(100, self._integral))
+        i = self._integral * self.KI
+
+        d = (error - self._previous_error) * self.KD
+        self._previous_error = error
+
+        cv = p + i + d
+        cv = max(-self.MAX_CORR, min(self.MAX_CORR, cv))
+
         return cv
 
 
@@ -35,8 +35,8 @@ class Motors:
     MAX_SPEED = 100
 
     def run(self, left_speed: int, right_speed:int):
-        motor_left = int(max(Robot.MIN_SPEED, min(Robot.MAX_SPEED, left_speed)))
-        motor_right = int(max(Robot.MIN_SPEED, min(Robot.MAX_SPEED, right_speed)))
+        motor_left = int(max(self.MIN_SPEED, min(self.MAX_SPEED, left_speed)))
+        motor_right = int(max(self.MIN_SPEED, min(self.MAX_SPEED, right_speed)))
         uart.write(""+str(motor_left)+";"+str(motor_right)+"m")
 
     def stop(self):
@@ -73,74 +73,86 @@ class Camera:
         self._blobs_far = []
         #self._last_best_line = None
 
+
     def update(self):
         self._img = sensor.snapshot()
         self._img_gs = self._img.to_grayscale(copy=True)
 
         self._blobs_near = self._img_gs.find_blobs([(0, 50)],
-            roi=Camera.ROI_NEAR,
+            roi=self.ROI_NEAR,
             pixels_threshold=150,
             area_threshold=80,
             merge=True)
 
         self._blobs_far = self._img_gs.find_blobs([(0, 50)],
-            roi=Camera.ROI_NEAR,
+            roi=self.ROI_FAR,
             pixels_threshold=150,
             area_threshold=80,
             merge=True)
 
         self.draw_debug()
 
+
     def find_lines(self):
         if self._img_gs is None:
             return []
 
-        line_blobs = []
-        for blob in self._blobs_near:
-            width = blob.w()
-            height = blob.h()
-            aspect_ratio = width / max(height, 1)
-            #print("aspect_ratio: {}".format(aspect_ratio))
+        lines = self._img_gs.find_lines(
+            roi=self.ROI_NEAR, threshold=1000, theta_margin=25, rho_margin=25)
 
-            if width > Camera.MIN_WIDTH and \
-                height > Camera.MIN_HEIGHT and \
-                aspect_ratio < 0.5:
-                line_blobs.append(blob)
+        return lines
 
-        return line_blobs
 
     def get_angle(self):
         if not self._blobs_near:
-            return None, False
+            return None
 
-        line_blobs = self.find_lines()
-        if len(line_blobs) == 0:
-            print("NO LINES")
-            return None, False
+        lines = self.find_lines()
 
-        for line_blob in line_blobs:
-            pass
-            #self._img.draw_rectangle(line_blob, color=(0, 255, 0))
-            #(x1, y1, x2, y2) = line.major_axis_line()
-            #self._img.draw_line(x1, y1, x2, y2, color=(255, 255, 0), thickness=2)
+        min_range = range(0, 45)
+        max_range = range(135, 180)
+        relevant_lines = []
+        for line in lines:
+            if (line.theta() in min_range) or (line.theta() in max_range):
+                relevant_lines.append(line)
 
-        return 0, False
+        angles = []
+        for line in relevant_lines:
+            if (line.theta() in min_range):
+                angles.append(line.theta())
+            elif (line.theta() in max_range):
+                angles.append(line.theta() - 180)
+            self._img.draw_line(line.line(), color=(255, 0, 0))
 
-    def draw_debug(self):
-        self._img.draw_rectangle(Camera.ROI_NEAR, color=(0, 0, 100), thickness=1)
-        self._img.draw_rectangle(Camera.ROI_FAR, color=(0, 100, 0), thickness=1)
-        for blob in self._blobs_near:
-            self._img.draw_rectangle(blob.rect(), color=(100, 0, 0), thickness=3)
+        if len(angles) == 0:
+            return None
+
+        angle = sum(angles) / len(angles)
+        self._img.draw_string(240, 210, "{}".format(int(angle)), color=(255, 0, 0), scale=2)
+
+        return angle
+
+
+    def draw_debug(self, verbose=False):
+        self._img.draw_rectangle(self.ROI_FAR, color=(0, 100, 0), thickness=1)
+        self._img.draw_rectangle(self.ROI_NEAR, color=(100, 0, 0), thickness=1)
+        if verbose:
+            for blob in self._blobs_far:
+                self._img.draw_rectangle(blob.rect(), color=(0, 100, 0), thickness=3)
+            for blob in self._blobs_near:
+                self._img.draw_rectangle(blob.rect(), color=(100, 0, 0), thickness=3)
+
 
 class Robot:
     BASE_SPEED = 80
     MAX_CORRECTION = 60
     MIN_SPEED = 20
+    MAX_SPEED = 80
 
     def __init__(self):
         self._motors = Motors()
         self._camera = Camera()
-        self._pid = PidControl(Camera.CENTER, 0.1)
+        self._pid = PidControl()
 
         ## check the below
         self.ist_near = Camera.CENTER
@@ -165,14 +177,34 @@ class Robot:
         pass
 
     def navigate(self):
-        self._camera.update() # get all raw data
-        angle, state = self._camera.get_angle()
+        self._self.update() # get all raw data
+        angle = self._self.get_angle()
 
-        #if state is False:
-            #print("NO ANGLE!")
+        correction = 0
+        if (angle < -5):
+            correction = 5
+        if (angle > 5):
+            correction = - 5
 
-    def __drive(self, left, right):
-        self._motors.run(left, right)
+        left_speed = self.BASE_SPEED - correction
+        right_speed = self.BASE_SPEED + correction
+
+        if left_speed < self.MIN_SPEED and left_speed > -self.MIN_SPEED:
+            left_speed = self.MIN_SPEED if left_speed >= 0 else -self.MIN_SPEED
+
+        if right_speed < self.MIN_SPEED and right_speed > -self.MIN_SPEED:
+            right_speed = self.MIN_SPEED if right_speed >= 0 else -self.MIN_SPEED
+
+
+        #correction_value = self._pid.update(angle)
+        print("LS:{}".format(left_speed))
+        print("RS:{}".format(right_speed))
+
+        self._drive(left_speed, right_speed)
+
+
+    def _drive(self, left_speed, right_speed):
+        self._motors.run(left_speed, right_speed)
 
 
 robot = Robot()
@@ -187,7 +219,7 @@ def start():
     while True:
         clock.tick() # next cycle
         robot.navigate()
-        print("FPS:{}".format(clock.fps()))
+        #print("FPS:{}".format(clock.fps()))
 
 def stop():
     robot.stop()
