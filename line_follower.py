@@ -2,6 +2,7 @@ import sensor
 import pyb
 import time
 import math
+import image
 
 uart = pyb.UART(1, 57600, timeout_char=50)
 
@@ -47,12 +48,12 @@ class Camera:
     BORDER_L = 50
     BORDER_R = 40
     HEIGHT = 240
+    MIN_WIDTH = 20
+    MIN_HEIGHT = 20
     CENTER = WIDTH // 2
-    RANGE_NEAR = HEIGHT // 2
-    RANGE_FAR = HEIGHT
-    ROI = (BORDER_L, 0, WIDTH - BORDER_L - BORDER_R, HEIGHT)
-    ROI_NEAR = (BORDER_L, 0, WIDTH - BORDER_L - BORDER_R, RANGE_NEAR - 1)
-    ROI_FAR = (BORDER_L, RANGE_NEAR, WIDTH - BORDER_L - BORDER_R, RANGE_FAR - RANGE_NEAR)
+    ROI = [BORDER_L, 0, WIDTH - BORDER_L - BORDER_R, HEIGHT]
+    ROI_FAR = [BORDER_L - 5, 0, WIDTH - BORDER_L - BORDER_R + 10, 120]
+    ROI_NEAR = [BORDER_L, 80, WIDTH - BORDER_L - BORDER_R, HEIGHT]
     BLACK_THRESHOLD = [(0, 35, -128, 127, -128, 127)]
     GREEN_THRESHOLD = [(30, 70, -60, -20, -10, 40)]
 
@@ -67,25 +68,69 @@ class Camera:
         sensor.set_auto_exposure(False, exposure_us=10000)
 
         self._img = None
+        self._img_gs = None
+        self._blobs_near = []
+        self._blobs_far = []
+        #self._last_best_line = None
 
-    def find_lines(self):
-        pass
-
-    def get_angle(self):
+    def update(self):
         self._img = sensor.snapshot()
-        img_gs = self._img.to_grayscale(copy=True)
+        self._img_gs = self._img.to_grayscale(copy=True)
+
+        self._blobs_near = self._img_gs.find_blobs([(0, 50)],
+            roi=Camera.ROI_NEAR,
+            pixels_threshold=150,
+            area_threshold=80,
+            merge=True)
+
+        self._blobs_far = self._img_gs.find_blobs([(0, 50)],
+            roi=Camera.ROI_NEAR,
+            pixels_threshold=150,
+            area_threshold=80,
+            merge=True)
 
         self.draw_debug()
 
-        # and now ...
+    def find_lines(self):
+        if self._img_gs is None:
+            return []
+
+        line_blobs = []
+        for blob in self._blobs_near:
+            width = blob.w()
+            height = blob.h()
+            aspect_ratio = width / max(height, 1)
+            #print("aspect_ratio: {}".format(aspect_ratio))
+
+            if width > Camera.MIN_WIDTH and \
+                height > Camera.MIN_HEIGHT and \
+                aspect_ratio < 0.5:
+                line_blobs.append(blob)
+
+        return line_blobs
+
+    def get_angle(self):
+        if not self._blobs_near:
+            return None, False
+
+        line_blobs = self.find_lines()
+        if len(line_blobs) == 0:
+            print("NO LINES")
+            return None, False
+
+        for line_blob in line_blobs:
+            pass
+            #self._img.draw_rectangle(line_blob, color=(0, 255, 0))
+            #(x1, y1, x2, y2) = line.major_axis_line()
+            #self._img.draw_line(x1, y1, x2, y2, color=(255, 255, 0), thickness=2)
+
+        return 0, False
 
     def draw_debug(self):
-        #roi = Camera.ROI
-        ron = Camera.ROI_NEAR
-        rof = Camera.ROI_FAR
-        #self._img.draw_rectangle(roi[0], roi[1], roi[2], roi[3], color=(255, 0, 0))
-        self._img.draw_rectangle(ron[0], ron[1], ron[2], ron[3], color=(0, 255, 0))
-        self._img.draw_rectangle(rof[0], rof[1], rof[2], rof[3], color=(0, 0, 255))
+        self._img.draw_rectangle(Camera.ROI_NEAR, color=(0, 0, 100), thickness=1)
+        self._img.draw_rectangle(Camera.ROI_FAR, color=(0, 100, 0), thickness=1)
+        for blob in self._blobs_near:
+            self._img.draw_rectangle(blob.rect(), color=(100, 0, 0), thickness=3)
 
 class Robot:
     BASE_SPEED = 80
@@ -120,8 +165,11 @@ class Robot:
         pass
 
     def navigate(self):
-        angle = self._camera.get_angle()
-        # weitermachen
+        self._camera.update() # get all raw data
+        angle, state = self._camera.get_angle()
+
+        #if state is False:
+            #print("NO ANGLE!")
 
     def __drive(self, left, right):
         self._motors.run(left, right)
@@ -139,7 +187,7 @@ def start():
     while True:
         clock.tick() # next cycle
         robot.navigate()
-        print(clock.fps())
+        print("FPS:{}".format(clock.fps()))
 
 def stop():
     robot.stop()
