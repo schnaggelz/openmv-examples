@@ -49,6 +49,7 @@ class Motors:
 
 
 class Camera:
+
     WIDTH = 320
     BORDER_L = 55
     BORDER_R = 45
@@ -58,11 +59,10 @@ class Camera:
     CENTER = WIDTH // 2
     ROI = [BORDER_L, 0, WIDTH - BORDER_L - BORDER_R, HEIGHT]
     ROI_FAR = [BORDER_L - 5, 0, WIDTH - BORDER_L - BORDER_R + 10, 120]
-    ROI_NEAR = [BORDER_L, 50, WIDTH - BORDER_L - BORDER_R, HEIGHT]
-    BLACK_THRESHOLD = [(0, 35, -128, 127, -128, 127)]
-    GREEN_THRESHOLD = [(30, 70, -60, -20, -10, 40)]
+    ROI_NEAR = [BORDER_L, 100, WIDTH - BORDER_L - BORDER_R, HEIGHT]
     LINE_ANGLE_POS_RANGE = range(0, 90)
     LINE_ANGLE_NEG_RANGE = range(91, 180)
+    GREEN_THRESHOLD = [(20, 80, -70, -15, 10, 60)]
 
     def __init__(self):
         sensor.reset()
@@ -75,54 +75,32 @@ class Camera:
         sensor.set_auto_exposure(False, exposure_us=10000)
 
         self._img = None
-        self._img_gs = None
-        self._blobs_near = []
-        self._blobs_far = []
-        self._angles = deque([], 100)
-        self._offsets = deque([], 100)
-
+        self._lines = []
+        self._rects = []
+        self._last_angle = 0
+        self._last_offset = 0
+        self._angles = deque([], 10)
+        self._offsets = deque([], 10)
 
     def update(self):
-        self._img = sensor.snapshot()
-        self._img_gs = self._img.to_grayscale(copy=True)
+        img = sensor.snapshot()
 
-        self._blobs_near = self._img_gs.find_blobs([(0, 50)],
-            roi=self.ROI_NEAR,
-            pixels_threshold=150,
-            area_threshold=80,
-            merge=True)
-
-        self._blobs_far = self._img_gs.find_blobs([(0, 50)],
-            roi=self.ROI_FAR,
-            pixels_threshold=150,
-            area_threshold=80,
-            merge=True)
-
-        self.draw_debug()
-
-
-    def find_lines(self):
-        if self._img_gs is None:
-            return []
-
-        lines = self._img_gs.find_lines(
+        self._lines = img.find_lines(
             roi=self.ROI_NEAR, threshold=1000, theta_margin=25, rho_margin=25)
 
-        return lines
+        self._rects = img.find_blobs(self.GREEN_THRESHOLD, roi=self.ROI_FAR,
+                                     pixels_threshold=300, merge=True)
 
+        self.draw_debug(img)
+        self._img = img
 
     def get_angle_and_offset(self):
-        if not self._blobs_near:
-            return None, None
-
-        lines = self.find_lines()
-
 
         relevant_lines = []
-        for line in lines:
+        for line in self._lines:
             # store only relevant lines
-            if (line.theta() in self.LINE_ANGLE_POS_RANGE) \
-                or (line.theta() in self.LINE_ANGLE_NEG_RANGE):
+            if (line.theta() in self.LINE_ANGLE_POS_RANGE \
+                or line.theta() in self.LINE_ANGLE_NEG_RANGE):
                 relevant_lines.append(line)
 
         for line in relevant_lines:
@@ -131,80 +109,85 @@ class Camera:
                 self._angles.append(line.theta())
             elif (line.theta() in self.LINE_ANGLE_NEG_RANGE):
                 self._angles.append(line.theta() - 180)
-            self._img.draw_line(line.line(), color=(255, 0, 0))
             # calculate offset from center and store
             offset = ((line.x1() + line.x2()) / 2) - self.CENTER
             self._offsets.append(offset)
 
-        if len(self._angles) == 0 or len(self._offsets) == 0:
-            return None, None
-
         angle = int(sum(self._angles) / len(self._angles))
         offset = int(sum( self._offsets) / len( self._offsets))
-        self._img.draw_string(240, 210, "{}".format(angle), color=(255, 0, 0), scale=2)
-        self._img.draw_string(60, 210, "{}".format(offset), color=(255, 0, 0), scale=2)
-        return angle, offset
+        return angle , offset
 
+    def get_rects_lr(self):
+        for rect in self._rects:
+            center = rect.cx()
+            print ("C:{}".format(center))
 
-    def draw_debug(self, verbose=False):
-        self._img.draw_rectangle(self.ROI_FAR, color=(0, 100, 0), thickness=1)
-        self._img.draw_rectangle(self.ROI_NEAR, color=(0, 0, 0), thickness=1)
-        if verbose:
-            for blob in self._blobs_far:
-                self._img.draw_rectangle(blob.rect(), color=(0, 100, 0), thickness=3)
-            for blob in self._blobs_near:
-                self._img.draw_rectangle(blob.rect(), color=(100, 0, 0), thickness=3)
+        return [], []
+
+    def draw_debug(self, img):
+
+        img.draw_rectangle(self.ROI_FAR, color=(0, 100, 0), thickness=1)
+        img.draw_rectangle(self.ROI_NEAR, color=(0, 0, 0), thickness=1)
+
+        angle = offset = 0
+        if len(self._angles) > 0 and len(self._offsets) > 0:
+            angle = int(sum(self._angles) / len(self._angles))
+            offset = int(sum(self._offsets) / len(self._offsets))
+        img.draw_string(240, 210, "{}".format(angle), color=(255, 0, 0), scale=2)
+        img.draw_string(60, 210, "{}".format(offset), color=(255, 0, 0), scale=2)
+
+        for line in self._lines:
+            img.draw_line(line.line(), color=(255, 0, 0))
+
+        for rect in self._rects:
+            img.draw_rectangle(rect.rect(), color=(0, 255, 0))
 
 
 class Robot:
-    BASE_SPEED = 40
+    BASE_SPEED = 50
     MIN_SPEED = 20
     MAX_SPEED = 80
+
+    class DirectionState:
+        NONE = 0
+        FORWARD = 1
+        BACKWARD = 2
+        LEFT = 3
+        RIGHT = 4
 
     def __init__(self):
         self._motors = Motors()
         self._camera = Camera()
         self._pid_angle = PidControl(max_corr=60, kp=2.0, ki=0.1, kd=1.0)
-        self._pid_offset = PidControl(max_corr=60, kp=0.5, ki=0.0, kd=0.6)
+        self._pid_offset = PidControl(max_corr=60, kp=0.5, ki=0.1, kd=0.6)
 
-        ## check the below
-        self.ist_near = Camera.CENTER
-        self.ist_far = Camera.CENTER
-        self.alpha = 0
-        self.last_error = 0
-        self.integral = 0
-        self.green_left = 0
-        self.green_right = 0
-        self.green_cooldown = 0
-        self.line_found = False
-        self.lost_counter = 0
-        self.calibrated = False
+        self._direction_state = Robot.DirectionState.NONE
+        self._direction_state_cooldown = 0
+        self._calibrated = True
 
     def init(self):
         pass
 
     def stop(self):
-        pass
+        self._drive(0, 0)
 
     def calibrate(self):
-        pass
+        self._calibrated = True
 
     def navigate(self):
+
         self._camera.update() # get all raw data
+
+        rl, rr = self._camera.get_rects_lr()
+
         angle, offset = self._camera.get_angle_and_offset()
 
         if angle is None or offset is None:
             return
 
-        offset_corr = 0
-        if offset < 10:
-            offset_corr = -20
-        elif offset > 10:
-            offset_corr = 20
-
         angle_corr = self._pid_angle.update(angle)
         offset_corr = self._pid_offset.update(offset)
-        print("OC:{}".format(offset_corr))
+        #print("OC:{}".format(offset_corr))
 
         left_speed = self.BASE_SPEED + offset_corr + angle_corr
         right_speed = self.BASE_SPEED - offset_corr - angle_corr
@@ -213,7 +196,6 @@ class Robot:
         #print("RS:{}".format(right_speed))
 
         #self._drive(left_speed, right_speed)
-
 
     def _drive(self, left_speed, right_speed):
         self._motors.run(left_speed, right_speed)
@@ -227,7 +209,6 @@ def init():
 def start():
     clock = time.clock()
     robot.calibrate()
-
     while True:
         clock.tick() # next cycle
         robot.navigate()
