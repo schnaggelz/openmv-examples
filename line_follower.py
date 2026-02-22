@@ -2,30 +2,35 @@ import sensor
 import pyb
 import time
 
+from collections import deque
+
 uart = pyb.UART(1, 57600, timeout_char=50)
 
 class PidControl:
-    KP = 2.0
-    KI = 0.1
-    KD = 1.0
-    MAX_CORR = 60
+    DEFAULT_KP = 2.0
+    DEFAULT_KI = 0.1
+    DEFAULT_KD = 1.0
 
-    def __init__(self):
+    def __init__(self, max_corr, kp=DEFAULT_KP, ki=DEFAULT_KI, kd=DEFAULT_KD):
+        self._max_corr = max_corr
+        self._kp = kp
+        self._ki = ki
+        self._kd = kd
         self._previous_error = 0
         self._integral = 0
 
     def update(self, error):
-        p = error * self.KP
+        p = error * self._kp
 
         self._integral += error
         self._integral = max(-100, min(100, self._integral))
-        i = self._integral * self.KI
+        i = self._integral * self._ki
 
-        d = (error - self._previous_error) * self.KD
+        d = (error - self._previous_error) * self._kd
         self._previous_error = error
 
         cv = p + i + d
-        cv = max(-self.MAX_CORR, min(self.MAX_CORR, cv))
+        cv = max(-self._max_corr, min(self._max_corr, cv))
 
         return cv
 
@@ -45,17 +50,19 @@ class Motors:
 
 class Camera:
     WIDTH = 320
-    BORDER_L = 50
-    BORDER_R = 40
+    BORDER_L = 55
+    BORDER_R = 45
     HEIGHT = 240
     MIN_WIDTH = 20
     MIN_HEIGHT = 20
     CENTER = WIDTH // 2
     ROI = [BORDER_L, 0, WIDTH - BORDER_L - BORDER_R, HEIGHT]
     ROI_FAR = [BORDER_L - 5, 0, WIDTH - BORDER_L - BORDER_R + 10, 120]
-    ROI_NEAR = [BORDER_L, 80, WIDTH - BORDER_L - BORDER_R, HEIGHT]
+    ROI_NEAR = [BORDER_L, 50, WIDTH - BORDER_L - BORDER_R, HEIGHT]
     BLACK_THRESHOLD = [(0, 35, -128, 127, -128, 127)]
     GREEN_THRESHOLD = [(30, 70, -60, -20, -10, 40)]
+    LINE_ANGLE_POS_RANGE = range(0, 90)
+    LINE_ANGLE_NEG_RANGE = range(91, 180)
 
     def __init__(self):
         sensor.reset()
@@ -71,7 +78,8 @@ class Camera:
         self._img_gs = None
         self._blobs_near = []
         self._blobs_far = []
-        #self._last_best_line = None
+        self._angles = deque([], 100)
+        self._offsets = deque([], 100)
 
 
     def update(self):
@@ -103,39 +111,44 @@ class Camera:
         return lines
 
 
-    def get_angle(self):
+    def get_angle_and_offset(self):
         if not self._blobs_near:
-            return None
+            return None, None
 
         lines = self.find_lines()
 
-        min_range = range(0, 45)
-        max_range = range(135, 180)
+
         relevant_lines = []
         for line in lines:
-            if (line.theta() in min_range) or (line.theta() in max_range):
+            # store only relevant lines
+            if (line.theta() in self.LINE_ANGLE_POS_RANGE) \
+                or (line.theta() in self.LINE_ANGLE_NEG_RANGE):
                 relevant_lines.append(line)
 
-        angles = []
         for line in relevant_lines:
-            if (line.theta() in min_range):
-                angles.append(line.theta())
-            elif (line.theta() in max_range):
-                angles.append(line.theta() - 180)
+            # normalize line agles and store
+            if (line.theta() in self.LINE_ANGLE_POS_RANGE):
+                self._angles.append(line.theta())
+            elif (line.theta() in self.LINE_ANGLE_NEG_RANGE):
+                self._angles.append(line.theta() - 180)
             self._img.draw_line(line.line(), color=(255, 0, 0))
+            # calculate offset from center and store
+            offset = ((line.x1() + line.x2()) / 2) - self.CENTER
+            self._offsets.append(offset)
 
-        if len(angles) == 0:
-            return None
+        if len(self._angles) == 0 or len(self._offsets) == 0:
+            return None, None
 
-        angle = sum(angles) / len(angles)
-        self._img.draw_string(240, 210, "{}".format(int(angle)), color=(255, 0, 0), scale=2)
-
-        return angle
+        angle = int(sum(self._angles) / len(self._angles))
+        offset = int(sum( self._offsets) / len( self._offsets))
+        self._img.draw_string(240, 210, "{}".format(angle), color=(255, 0, 0), scale=2)
+        self._img.draw_string(60, 210, "{}".format(offset), color=(255, 0, 0), scale=2)
+        return angle, offset
 
 
     def draw_debug(self, verbose=False):
         self._img.draw_rectangle(self.ROI_FAR, color=(0, 100, 0), thickness=1)
-        self._img.draw_rectangle(self.ROI_NEAR, color=(100, 0, 0), thickness=1)
+        self._img.draw_rectangle(self.ROI_NEAR, color=(0, 0, 0), thickness=1)
         if verbose:
             for blob in self._blobs_far:
                 self._img.draw_rectangle(blob.rect(), color=(0, 100, 0), thickness=3)
@@ -144,15 +157,15 @@ class Camera:
 
 
 class Robot:
-    BASE_SPEED = 80
-    MAX_CORRECTION = 60
+    BASE_SPEED = 40
     MIN_SPEED = 20
     MAX_SPEED = 80
 
     def __init__(self):
         self._motors = Motors()
         self._camera = Camera()
-        self._pid = PidControl()
+        self._pid_angle = PidControl(max_corr=60, kp=2.0, ki=0.1, kd=1.0)
+        self._pid_offset = PidControl(max_corr=60, kp=0.5, ki=0.0, kd=0.6)
 
         ## check the below
         self.ist_near = Camera.CENTER
@@ -177,30 +190,29 @@ class Robot:
         pass
 
     def navigate(self):
-        self._self.update() # get all raw data
-        angle = self._self.get_angle()
+        self._camera.update() # get all raw data
+        angle, offset = self._camera.get_angle_and_offset()
 
-        correction = 0
-        if (angle < -5):
-            correction = 5
-        if (angle > 5):
-            correction = - 5
+        if angle is None or offset is None:
+            return
 
-        left_speed = self.BASE_SPEED - correction
-        right_speed = self.BASE_SPEED + correction
+        offset_corr = 0
+        if offset < 10:
+            offset_corr = -20
+        elif offset > 10:
+            offset_corr = 20
 
-        if left_speed < self.MIN_SPEED and left_speed > -self.MIN_SPEED:
-            left_speed = self.MIN_SPEED if left_speed >= 0 else -self.MIN_SPEED
+        angle_corr = self._pid_angle.update(angle)
+        offset_corr = self._pid_offset.update(offset)
+        print("OC:{}".format(offset_corr))
 
-        if right_speed < self.MIN_SPEED and right_speed > -self.MIN_SPEED:
-            right_speed = self.MIN_SPEED if right_speed >= 0 else -self.MIN_SPEED
+        left_speed = self.BASE_SPEED + offset_corr + angle_corr
+        right_speed = self.BASE_SPEED - offset_corr - angle_corr
 
+        #print("LS:{}".format(left_speed))
+        #print("RS:{}".format(right_speed))
 
-        #correction_value = self._pid.update(angle)
-        print("LS:{}".format(left_speed))
-        print("RS:{}".format(right_speed))
-
-        self._drive(left_speed, right_speed)
+        #self._drive(left_speed, right_speed)
 
 
     def _drive(self, left_speed, right_speed):
