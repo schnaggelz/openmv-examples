@@ -74,13 +74,17 @@ class Camera:
         sensor.set_auto_whitebal(False)
         sensor.set_auto_exposure(False, exposure_us=10000)
 
-        self._img = None
+        self._image = None
         self._lines = []
         self._rects = []
         self._last_angle = 0
         self._last_offset = 0
         self._angles = deque([], 10)
         self._offsets = deque([], 10)
+
+    @property
+    def image(self):
+        return self._image
 
     def update(self):
         img = sensor.snapshot()
@@ -92,7 +96,7 @@ class Camera:
                                      pixels_threshold=300, merge=True)
 
         self.draw_debug(img)
-        self._img = img
+        self._image = img
 
     def get_angle_and_offset(self):
 
@@ -117,12 +121,17 @@ class Camera:
         offset = int(sum( self._offsets) / len( self._offsets))
         return angle , offset
 
-    def get_rects_lr(self):
+    def get_num_rects_lr(self):
+
+        num_rects_l = 0
+        num_rects_r = 0
         for rect in self._rects:
             center = rect.cx()
-            print ("C:{}".format(center))
-
-        return [], []
+            if center <= self.WIDTH:
+                num_rects_l += 1
+            else:
+                num_rects_r += 1
+        return num_rects_l, num_rects_r
 
     def draw_debug(self, img):
 
@@ -133,8 +142,9 @@ class Camera:
         if len(self._angles) > 0 and len(self._offsets) > 0:
             angle = int(sum(self._angles) / len(self._angles))
             offset = int(sum(self._offsets) / len(self._offsets))
-        img.draw_string(240, 210, "{}".format(angle), color=(255, 0, 0), scale=2)
-        img.draw_string(60, 210, "{}".format(offset), color=(255, 0, 0), scale=2)
+
+        img.draw_string(20, 210, "{}".format(offset), color=(255, 0, 0), scale=2)
+        img.draw_string(260, 210, "{}".format(angle), color=(255, 0, 0), scale=2)
 
         for line in self._lines:
             img.draw_line(line.line(), color=(255, 0, 0))
@@ -148,12 +158,27 @@ class Robot:
     MIN_SPEED = 20
     MAX_SPEED = 80
 
-    class DirectionState:
+    class Direction:
         NONE = 0
         FORWARD = 1
         BACKWARD = 2
         LEFT = 3
         RIGHT = 4
+        MAX = 5
+
+        def __init__(self, state=NONE):
+            self._state = state
+
+        @property
+        def state(self):
+            return self._state
+
+        @state.setter
+        def state(self, value):
+            if value < self.NONE or value >= self.MAX:
+                raise ValueError("STATE")
+            self._state = value
+
 
     def __init__(self):
         self._motors = Motors()
@@ -161,8 +186,8 @@ class Robot:
         self._pid_angle = PidControl(max_corr=60, kp=2.0, ki=0.1, kd=1.0)
         self._pid_offset = PidControl(max_corr=60, kp=0.5, ki=0.1, kd=0.6)
 
-        self._direction_state = Robot.DirectionState.NONE
-        self._direction_state_cooldown = 0
+        self._direction = Robot.Direction()
+        self._direction_cooldown = 0
         self._calibrated = True
 
     def init(self):
@@ -174,20 +199,40 @@ class Robot:
     def calibrate(self):
         self._calibrated = True
 
+    def get_direction(self):
+        rl, rr = self._camera.get_num_rects_lr()
+        if rr + rl >= 2:
+            self._direction.state = Robot.Direction.BACKWARD
+        elif rl == 1:
+            self._direction.state = Robot.Direction.LEFT
+        elif rr == 1:
+            self._direction.state = Robot.Direction.RIGHT
+        else:
+            self._direction.state = Robot.Direction.FORWARD
+        return self._direction
+
     def navigate(self):
 
-        self._camera.update() # get all raw data
+        self._camera.update() # get all raw data to capture only once
 
-        rl, rr = self._camera.get_rects_lr()
+        if self.get_direction() == Robot.Direction.BACKWARD:
+            self._camera.image.draw_string(240, 210, "BACK", color=(0, 0, 0), scale=2)
+            return
+
+        if self.get_direction() == Robot.Direction.LEFT:
+            self._camera.image.draw_string(240, 210, "LEFT", color=(0, 0, 0), scale=2)
+            return
+
+        if self.get_direction() == Robot.Direction.RIGHT:
+            self._camera.image.draw_string(240, 210, "RIGHT", color=(0, 0, 0), scale=2)
+            return
 
         angle, offset = self._camera.get_angle_and_offset()
-
         if angle is None or offset is None:
             return
 
         angle_corr = self._pid_angle.update(angle)
         offset_corr = self._pid_offset.update(offset)
-        #print("OC:{}".format(offset_corr))
 
         left_speed = self.BASE_SPEED + offset_corr + angle_corr
         right_speed = self.BASE_SPEED - offset_corr - angle_corr
