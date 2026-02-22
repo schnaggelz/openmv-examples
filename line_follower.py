@@ -69,6 +69,7 @@ class Camera:
     LINE_ANGLE_POS_RANGE = range(0, 90)
     LINE_ANGLE_NEG_RANGE = range(91, 180)
     GREEN_THRESHOLD = [(10, 80, -70, -15, 5, 60)]
+    MAX_RECTS_ACC = 10
 
     def __init__(self):
         sensor.reset()
@@ -87,6 +88,8 @@ class Camera:
         self._last_offset = 0
         self._angles = deque([], 10)
         self._offsets = deque([], 10)
+        self._num_rects_l = []
+        self._num_rects_r = []
 
     @property
     def image(self):
@@ -123,11 +126,10 @@ class Camera:
             self._offsets.append(offset)
 
         angle = int(sum(self._angles) / len(self._angles))
-        offset = int(sum( self._offsets) / len( self._offsets))
+        offset = int(sum(self._offsets) / len( self._offsets))
         return angle , offset
 
     def get_num_rects_lr(self):
-
         num_rects_l = 0
         num_rects_r = 0
         for rect in self._rects:
@@ -136,6 +138,18 @@ class Camera:
                 num_rects_l += 1
             else:
                 num_rects_r += 1
+            self._num_rects_l.append(num_rects_l)
+            self._num_rects_r.append(num_rects_r)
+
+        if len(self._num_rects_l) >= self.MAX_RECTS_ACC \
+           or len(self._num_rects_r) >= self.MAX_RECTS_ACC:
+            num_rects_l = max(self._num_rects_l)
+            num_rects_r = max(self._num_rects_r)
+            self._num_rects_l.clear()
+            self._num_rects_r.clear()
+        else:
+            return 0, 0
+
         return num_rects_l, num_rects_r
 
     def draw_debug(self, img):
@@ -188,15 +202,15 @@ class Robot:
     def __init__(self):
         self._motors = Motors()
         self._camera = Camera()
-        self._pid_angle = PidControl(max_corr=60, kp=1.0, ki=0.1, kd=0.5)
-        self._pid_offset = PidControl(max_corr=60, kp=0.5, ki=0.1, kd=0.5)
+        self._pid_angle = PidControl(max_corr=60, kp=1.5, ki=0.1, kd=0.6)
+        self._pid_offset = PidControl(max_corr=60, kp=0.8, ki=0.1, kd=0.5)
 
         self._direction = Robot.Direction()
         self._direction_cooldown = 0
         self._calibrated = True
 
     def init(self):
-        self._motors.disable()
+        #self._motors.disable()
         pass
 
     def stop(self):
@@ -206,41 +220,50 @@ class Robot:
         self._calibrated = True
 
     def get_direction(self):
+
+        self._direction_cooldown -= 1
         if self._direction_cooldown > 0:
             self._camera.image.draw_string(260, 20, "{}".format(
                 self._direction_cooldown), color=(255, 0, 0), scale=2)
-            self._direction_cooldown -= 1
+            #print("COOLDOWN")
             return self._direction
-        rl, rr = self._camera.get_num_rects_lr()
-        if rr + rl >= 2:
-            self._direction.state = Robot.Direction.BACK
-        elif rl == 1:
-            self._direction.state = Robot.Direction.LEFT
-        elif rr == 1:
-            self._direction.state = Robot.Direction.RIGHT
         else:
-            self._direction.state = Robot.Direction.STRAIGHT
+            #print("NEW_DIRECTION")
+            self._direction_cooldown = 0
+            rl, rr = self._camera.get_num_rects_lr()
+            if rr + rl >= 2:
+                self._direction.state = Robot.Direction.BACK
+                #print("Robot.Direction.BACK")
+                self._direction_cooldown = 80
+            elif rl == 1:
+                self._direction.state = Robot.Direction.LEFT
+                #print("Robot.Direction.LEFT")
+                self._direction_cooldown = 150
+            elif rr == 1:
+                #print("Robot.Direction.RIGHT")
+                self._direction.state = Robot.Direction.RIGHT
+                self._direction_cooldown = 150
+            else:
+                #print("Robot.Direction.STRAIGHT")
+                self._direction.state = Robot.Direction.STRAIGHT
         return self._direction
 
     def turn_back(self):
         self._camera.image.draw_string(20, 20, "BACK", color=(255, 0, 0), scale=2)
-        self._motors.drive_delay(90, 20)
-        if self._direction_cooldown == 0:
-            self._direction_cooldown = 500
+        self._motors.drive(90, -90)
+        #print("TURN_BACK")
         return True
 
     def turn_left(self):
         self._camera.image.draw_string(24, 20, "LEFT", color=(255, 0, 0), scale=2)
         self._motors.drive(20, 90)
-        if self._direction_cooldown == 0:
-            self._direction_cooldown = 200
+        #print("TURN_LEFT")
         return True
 
     def turn_right(self):
         self._camera.image.draw_string(20, 20, "RIGHT", color=(255, 0, 0), scale=2)
-        self._motors.drive(-90, 90)
-        if self._direction_cooldown == 0:
-            self._direction_cooldown = 200
+        self._motors.drive(90, 20)
+        #print("TURN_RIGHT")
         return True
 
     def navigate_forward(self):
@@ -269,6 +292,8 @@ class Robot:
         self._camera.update()
 
         direction = self.get_direction()
+        #print("{}".format(self._direction_cooldown))
+
         if direction.state == Robot.Direction.BACK:
             return self.turn_back()
         if direction.state == Robot.Direction.LEFT:
@@ -290,7 +315,7 @@ def start():
     while True:
         clock.tick() # next cycle
         robot.navigate()
-        print("FPS:{}".format(clock.fps()))
+        #print("FPS:{}".format(clock.fps()))
 
 def stop():
     robot.stop()
