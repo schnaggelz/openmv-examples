@@ -211,22 +211,19 @@ class Robot:
             self._direction.state = Robot.Direction.FORWARD
         return self._direction
 
-    def navigate(self):
+    def navigate_back(self):
+        self._camera.image.draw_string(240, 210, "BACK", color=(0, 0, 0), scale=2)
+        return True
 
-        self._camera.update() # get all raw data to capture only once
+    def navigate_left(self):
+        self._camera.image.draw_string(240, 210, "LEFT", color=(0, 0, 0), scale=2)
+        return True
 
-        if self.get_direction() == Robot.Direction.BACKWARD:
-            self._camera.image.draw_string(240, 210, "BACK", color=(0, 0, 0), scale=2)
-            return
+    def navigate_right(self):
+        self._camera.image.draw_string(240, 210, "RIGHT", color=(0, 0, 0), scale=2)
+        return True
 
-        if self.get_direction() == Robot.Direction.LEFT:
-            self._camera.image.draw_string(240, 210, "LEFT", color=(0, 0, 0), scale=2)
-            return
-
-        if self.get_direction() == Robot.Direction.RIGHT:
-            self._camera.image.draw_string(240, 210, "RIGHT", color=(0, 0, 0), scale=2)
-            return
-
+    def navigate_forward(self):
         angle, offset = self._camera.get_angle_and_offset()
         if angle is None or offset is None:
             return
@@ -240,10 +237,23 @@ class Robot:
         #print("LS:{}".format(left_speed))
         #print("RS:{}".format(right_speed))
 
-        #self._drive(left_speed, right_speed)
+        #self._motors.run(left_speed, right_speed)
+        return True
 
-    def _drive(self, left_speed, right_speed):
-        self._motors.run(left_speed, right_speed)
+    def navigate(self):
+
+        self._camera.update() # get all raw data to capture only once
+
+        if self.get_direction() == Robot.Direction.BACKWARD:
+            return self.navigate_back()
+
+        if self.get_direction() == Robot.Direction.LEFT:
+            return self.navigate_left()
+
+        if self.get_direction() == Robot.Direction.RIGHT:
+            return self.navigate_right()
+
+        return self.navigate_forward()
 
 
 robot = Robot()
